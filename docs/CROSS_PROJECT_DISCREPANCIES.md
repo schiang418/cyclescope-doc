@@ -5,7 +5,7 @@
 >
 > **Reference**: [UNIFIED_AUTH_STRATEGY.md](./UNIFIED_AUTH_STRATEGY.md) — the single source of truth
 >
-> Last updated: 2026-02-17
+> Last updated: 2026-02-18
 
 ---
 
@@ -42,17 +42,17 @@ The three projects use fundamentally different tier naming schemes. If these don
 | **SwingTrade** | `'free'`, `'stocks'`, `'stocks_and_options'` |
 | **OptionStrategy** | References `tier` field but doesn't define specific values |
 
-**Resolution**: Adopt SwingTrade's approach — `'free'`, `'stocks'`, `'stocks_and_options'`.
+**Resolution**: Adopt two canonical tiers — `'basic'` and `'stocks_and_options'`. No free tier exists.
 
-**Rationale**: These values are descriptive and map directly to which services the user can access. The portal's `'basic'`/`'premium'` are ambiguous — `'premium'` doesn't tell you *which* premium services are included, and there's no way to represent "stocks only" vs "stocks + options" with a single `'premium'` tier.
+**Rationale**: There are only two Patreon subscription levels. `basic` is the base offering (Portal only). `stocks_and_options` is the premium tier (Portal + SwingTrade + OptionStrategy). SwingTrade and OptionStrategy are **premium services** — they nominally require `stocks_and_options`. However, which tiers can access which services is a business decision configured via each service's `ALLOWED_TIERS`. Currently, as a promotional business decision, all `basic` members are given access to all premium services.
 
 **Changes Required**:
 
 | Project | What to Change |
 |---------|---------------|
-| **Portal** | Replace `mapPatreonTierToAccess()` return type from `'free' \| 'basic' \| 'premium'` to `'free' \| 'stocks' \| 'stocks_and_options'`. Update database `tier` column values. Update all tier checks in frontend and backend. |
-| **SwingTrade** | Already aligned. No changes needed. |
-| **OptionStrategy** | Define `ALLOWED_TIERS = ['stocks_and_options']` explicitly in auth code. |
+| **Portal** | Replace `mapPatreonTierToAccess()` return type to `'basic' \| 'stocks_and_options'`. Update database `tier` column values. Update all tier checks in frontend and backend. |
+| **SwingTrade** | Update tier values. Define `ALLOWED_TIERS = ['basic', 'stocks_and_options']` (current business policy). |
+| **OptionStrategy** | Define `ALLOWED_TIERS = ['basic', 'stocks_and_options']` (current business policy). |
 
 ---
 
@@ -363,16 +363,15 @@ The portal's tier mapping function returns different tier values than what the s
 
 | Portal's Current Implementation | What Sub-Portals Expect |
 |-------------------------------|------------------------|
-| `'free' \| 'basic' \| 'premium'` | `'free' \| 'stocks' \| 'stocks_and_options'` |
+| `'free' \| 'basic' \| 'premium'` | `'basic' \| 'stocks_and_options'` |
 | Maps from Patreon tier *names* (e.g., `'Premium Tier'`) | Maps from Patreon tier *IDs* |
-| Returns `'basic'` as default for active patrons | No default — should explicitly map each tier |
+| Returns `'basic'` as default for active patrons | Should default to `'basic'` for unmapped tiers |
 
-**Resolution**: Portal must map from Patreon tier IDs to the canonical tier values.
+**Resolution**: Portal must map from Patreon tier IDs to the two canonical tier values.
 
 ```typescript
 const PATREON_TIER_MAP: Record<string, SubscriptionTier> = {
-  '<patreon_free_tier_id>': 'free',
-  '<patreon_stocks_tier_id>': 'stocks',
+  '<patreon_basic_tier_id>': 'basic',
   '<patreon_both_tier_id>': 'stocks_and_options',
 };
 ```
@@ -381,7 +380,7 @@ const PATREON_TIER_MAP: Record<string, SubscriptionTier> = {
 
 | Project | What to Change |
 |---------|---------------|
-| **Portal** | Rewrite `mapPatreonTierToAccess()` to use tier IDs and return canonical values. |
+| **Portal** | Rewrite `mapPatreonTierToAccess()` to use tier IDs and return `'basic' \| 'stocks_and_options'`. |
 
 ---
 
@@ -436,7 +435,7 @@ Neither sub-portal explicitly checks tier on the `/auth` endpoint in their curre
 |---------|---------------|
 | **Portal doc** | Update sub-portal example to include tier check. |
 | **SwingTrade** | Already aligned. |
-| **OptionStrategy** | Add tier check: `if (!ALLOWED_TIERS.includes(payload.tier)) redirect to portal`. |
+| **OptionStrategy** | Add tier check: `if (!ALLOWED_TIERS.includes(payload.tier)) redirect to portal`. `ALLOWED_TIERS = ['basic', 'stocks_and_options']` (current policy). |
 
 ---
 
@@ -466,7 +465,7 @@ Neither sub-portal explicitly checks tier on the `/auth` endpoint in their curre
 
 | # | Discrepancy | Severity | Portal Change | SwingTrade Change | OptionStrategy Change |
 |---|------------|----------|---------------|-------------------|-----------------------|
-| 1 | Tier values | CRITICAL | Yes | No | Yes |
+| 1 | Tier values | CRITICAL | Yes | Yes | Yes |
 | 2 | Token secret strategy | CRITICAL | Yes | No | No |
 | 3 | Portal env var names | HIGH | Yes | Info only | No |
 | 4 | Cookie names | HIGH | Yes | Yes | No |
@@ -488,5 +487,5 @@ Neither sub-portal explicitly checks tier on the `/auth` endpoint in their curre
 | Project | Total Changes | Critical | High | Moderate | Low |
 |---------|--------------|----------|------|----------|-----|
 | **Portal** | 13 | 3 | 5 | 4 | 1 |
-| **SwingTrade** | 5 | 1 | 1 | 2 | 1 |
+| **SwingTrade** | 6 | 2 | 1 | 2 | 1 |
 | **OptionStrategy** | 6 | 2 | 2 | 1 | 1 |
