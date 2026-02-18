@@ -301,7 +301,7 @@ This is the short-lived token the portal generates when a user clicks a sub-port
 interface HandoffTokenPayload {
   sub: string;           // User ID (as string) — MUST use `sub` claim (JWT standard)
   email: string;         // User email
-  tier: SubscriptionTier; // 'free' | 'stocks' | 'stocks_and_options'
+  tier: SubscriptionTier; // 'basic' | 'stocks_and_options'
   service: string;       // 'swingtrade' | 'option_strategy' — target service identifier
   iat: number;           // Issued at (automatic via .setIssuedAt())
   exp: number;           // Expiration (automatic via .setExpirationTime('5m'))

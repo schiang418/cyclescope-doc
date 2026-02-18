@@ -465,7 +465,7 @@ Neither sub-portal explicitly checks tier on the `/auth` endpoint in their curre
 
 | # | Discrepancy | Severity | Portal Change | SwingTrade Change | OptionStrategy Change |
 |---|------------|----------|---------------|-------------------|-----------------------|
-| 1 | Tier values | CRITICAL | Yes | No | Yes |
+| 1 | Tier values | CRITICAL | Yes | Yes | Yes |
 | 2 | Token secret strategy | CRITICAL | Yes | No | No |
 | 3 | Portal env var names | HIGH | Yes | Info only | No |
 | 4 | Cookie names | HIGH | Yes | Yes | No |
@@ -487,5 +487,5 @@ Neither sub-portal explicitly checks tier on the `/auth` endpoint in their curre
 | Project | Total Changes | Critical | High | Moderate | Low |
 |---------|--------------|----------|------|----------|-----|
 | **Portal** | 13 | 3 | 5 | 4 | 1 |
-| **SwingTrade** | 5 | 1 | 1 | 2 | 1 |
+| **SwingTrade** | 6 | 2 | 1 | 2 | 1 |
 | **OptionStrategy** | 6 | 2 | 2 | 1 | 1 |

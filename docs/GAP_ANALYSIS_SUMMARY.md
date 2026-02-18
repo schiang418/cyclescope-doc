@@ -29,7 +29,7 @@ Three CycleScope projects were analyzed for authentication alignment:
 
 | # | Issue | Current State | Resolution |
 |---|-------|---------------|------------|
-| 1 | **Tier Values Mismatch** | Portal: `free`, `basic`, `premium` / SwingTrade: `free`, `stocks`, `stocks_and_options` / OptionStrategy: undefined | Adopt `basic`, `stocks_and_options` (no free tier; services are independent — tier access is a business decision) |
+| 1 | **Tier Values Mismatch** | Portal: `free`, `basic`, `premium` / SwingTrade: `free`, `stocks`, `stocks_and_options` / OptionStrategy: undefined | Adopt `basic`, `stocks_and_options` (no free tier; both sub-portals are premium services — tier access is a business decision; currently all tiers get access) |
 | 2 | **Token Secret Strategy** | Portal: single shared `PREMIUM_TOKEN_SECRET` / SwingTrade: per-service secrets / OptionStrategy: single shared | Per-service secrets — `SWINGTRADE_TOKEN_SECRET`, `OPTION_STRATEGY_TOKEN_SECRET` |
 | 6 | **Handoff Token JWT Claims** | Portal: `userId` in body, includes `service` / SwingTrade: `sub` claim, includes `patreonId` / OptionStrategy: `userId` in body | Standardize: `sub` (userId), `email`, `tier`, `service`; drop `patreonId` |
 
@@ -68,7 +68,7 @@ Three CycleScope projects were analyzed for authentication alignment:
 | Project | Total | Critical | High | Moderate | Low |
 |---------|-------|----------|------|----------|-----|
 | **Portal** | 13 | 3 | 5 | 4 | 1 |
-| **SwingTrade** | 5 | 1 | 1 | 2 | 1 |
+| **SwingTrade** | 6 | 2 | 1 | 2 | 1 |
 | **OptionStrategy** | 6 | 2 | 2 | 1 | 1 |
 
 ---
@@ -93,10 +93,11 @@ Three CycleScope projects were analyzed for authentication alignment:
 | 16 | MODERATE | Implement webhook handler per unified strategy |
 | 8 | LOW | Update sub-portal example redirect from `/dashboard` to `/` |
 
-### SwingTrade (5 changes)
+### SwingTrade (6 changes)
 
 | # | Severity | Change |
 |---|----------|--------|
+| 1 | CRITICAL | Update tier values from `free`/`stocks`/`stocks_and_options` to `basic`/`stocks_and_options`; set `ALLOWED_TIERS = ['basic', 'stocks_and_options']` (current business policy) |
 | 6 | CRITICAL | Add `service` claim validation; remove `patreonId` from expected claims; read user ID from `payload.sub` |
 | 4 | HIGH | Rename cookie from `session` to `swingtrade_session` |
 | 9 | MODERATE | Replace `PORTAL_ORIGIN` env var with `MEMBER_PORTAL_URL` |
