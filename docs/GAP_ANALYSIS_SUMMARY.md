@@ -38,7 +38,7 @@ Three CycleScope projects were analyzed for authentication alignment:
 | # | Issue | Current State | Resolution |
 |---|-------|---------------|------------|
 | 3 | **Portal Env Var Names** | Portal: `PREMIUM_TOKEN_SECRET`, `PREMIUM_STOCKS_URL`, `PREMIUM_OPTIONS_URL` / SwingTrade: `SWINGTRADE_TOKEN_SECRET`, `SWINGTRADE_URL` | Service-specific names: `SWINGTRADE_TOKEN_SECRET`, `OPTION_STRATEGY_TOKEN_SECRET`, `SWINGTRADE_URL`, `OPTION_STRATEGY_URL` |
-| 4 | **Cookie Names** | Portal: `stocks_session` / SwingTrade: `session` / OptionStrategy: `swingtrade_session` | Convention `{service}_session`: `swingtrade_session`, `option_strategy_session`, `cyclescope_portal_session` |
+| 4 | **Cookie Names** | Portal: `stocks_session` / SwingTrade: `session` / OptionStrategy: `swingtrade_session` | Sub-portals: `swingtrade_session`, `option_strategy_session`. Portal: keep `app_session_id` (no rename) |
 | 7 | **Local Session Token Claims** | Portal: `userId`, `email` (no tier) / SwingTrade: `sub`, `email`, `tier` / OptionStrategy: `userId`, `email`, `tier` | Standardize: `sub`, `email`, `tier` |
 | 13 | **Tier Mapping Function** | Portal maps from Patreon tier *names* returning `basic`/`premium` | Map from Patreon tier *IDs* returning `basic`/`stocks_and_options` |
 | 15 | **Tier Check on `/auth`** | SwingTrade checks tier; Portal example and OptionStrategy do not | All sub-portals MUST check tier (defense in depth) |
@@ -50,7 +50,7 @@ Three CycleScope projects were analyzed for authentication alignment:
 | 5 | **Portal Launch Endpoint** | Portal: `GET /api/premium/access-token?service=xxx` / SwingTrade: `POST /api/launch/swingtrade` | Per-service `POST` endpoints |
 | 9 | **CORS Origin Variable** | SwingTrade: `PORTAL_ORIGIN` / OptionStrategy: `MEMBER_PORTAL_URL` | Use `MEMBER_PORTAL_URL` everywhere |
 | 11 | **Health Check Exclusion** | Only OptionStrategy excludes `/api/health` from auth | All sub-portals MUST exclude `/api/health` |
-| 12 | **Portal Session Cookie** | Currently `app_session_id` | Rename to `cyclescope_portal_session` |
+| 12 | **Portal Session Cookie** | Currently `app_session_id` | **Keep `app_session_id`** — no functional benefit to renaming; would log out all users |
 | 14 | **Service Identifier Values** | Portal uses generic `'stocks'`, `'options'` | Use actual names: `'swingtrade'`, `'option_strategy'` |
 
 ### LOW (3)
@@ -67,7 +67,7 @@ Three CycleScope projects were analyzed for authentication alignment:
 
 | Project | Total | Critical | High | Moderate | Low |
 |---------|-------|----------|------|----------|-----|
-| **Portal** | 13 | 3 | 5 | 4 | 1 |
+| **Portal** | 12 | 3 | 5 | 3 | 1 |
 | **SwingTrade** | 6 | 2 | 1 | 2 | 1 |
 | **OptionStrategy** | 6 | 2 | 2 | 1 | 1 |
 
@@ -75,7 +75,7 @@ Three CycleScope projects were analyzed for authentication alignment:
 
 ## Changes Required Per Project
 
-### Portal (13 changes)
+### Portal (12 changes)
 
 | # | Severity | Change |
 |---|----------|--------|
@@ -83,12 +83,12 @@ Three CycleScope projects were analyzed for authentication alignment:
 | 2 | CRITICAL | Replace `PREMIUM_TOKEN_SECRET` with `SWINGTRADE_TOKEN_SECRET` + `OPTION_STRATEGY_TOKEN_SECRET`; use correct secret per service |
 | 6 | CRITICAL | Use `.setSubject(String(user.id))` for handoff tokens; add `service` claim; remove `userId` from payload body |
 | 3 | HIGH | Rename env vars: `PREMIUM_STOCKS_URL` -> `SWINGTRADE_URL`, `PREMIUM_OPTIONS_URL` -> `OPTION_STRATEGY_URL` |
-| 4 | HIGH | Rename cookie references: `stocks_session` -> `swingtrade_session`, `options_session` -> `option_strategy_session` |
+| 4 | HIGH | Rename sub-portal cookie references: `stocks_session` -> `swingtrade_session`, `options_session` -> `option_strategy_session` (portal keeps `app_session_id`) |
 | 7 | HIGH | Update sub-portal session token example to use `sub` claim and include `tier` |
 | 13 | HIGH | Rewrite tier mapper to use Patreon tier IDs, returning `basic` / `stocks_and_options` |
 | 15 | HIGH | Update sub-portal example code to include tier check after token verification |
 | 5 | MODERATE | Replace `GET /api/premium/access-token?service=xxx` with per-service `POST /api/launch/*` endpoints |
-| 12 | MODERATE | Rename `app_session_id` cookie to `cyclescope_portal_session` |
+| 12 | ~~MODERATE~~ | ~~Rename `app_session_id` cookie~~ — **Resolved: keep `app_session_id`, no change needed** |
 | 14 | MODERATE | Use `'swingtrade'` and `'option_strategy'` as service identifiers in token claims |
 | 16 | MODERATE | Implement webhook handler per unified strategy |
 | 8 | LOW | Update sub-portal example redirect from `/dashboard` to `/` |
@@ -123,7 +123,7 @@ Three CycleScope projects were analyzed for authentication alignment:
 2. **Portal token secrets & env vars** (#2, #3) — Security foundation
 3. **Handoff token claims** (#6) — Portal + both sub-portals
 4. **Sub-portal auth validation** (#15, #11) — Defense in depth
-5. **Cookie names** (#4, #12) — Breaking change, coordinate deployment
+5. **Sub-portal cookie names** (#4) — SwingTrade and OptionStrategy only (portal keeps `app_session_id`)
 6. **Session token claims** (#7) — After handoff tokens are stable
 7. **Launch endpoints & service IDs** (#5, #14) — API contract changes
 8. **CORS, redirects, error format** (#9, #8, #10) — Low-risk cleanup

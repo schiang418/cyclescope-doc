@@ -160,7 +160,7 @@ OPTION_STRATEGY_URL=https://option-strategy.up.railway.app
 RESEND_API_KEY=re_xxxxx
 
 # ── Portal Cookie ──
-# Cookie name defined in code as constant: 'cyclescope_portal_session'
+# Cookie name defined in code as constant: 'app_session_id'
 ```
 
 ### 3.2 SwingTrade (`SwingTrade/.env`)
@@ -271,7 +271,7 @@ MEMBER_PORTAL_URL=https://portal.cyclescope.com
 | Library | `jose` | |
 | Signing Secret | Portal's `JWT_SECRET` | |
 | Expiration | `7d` (email/password login) or `365d` (Patreon OAuth) | |
-| Cookie | `cyclescope_portal_session` | |
+| Cookie | `app_session_id` | |
 
 **Payload**:
 ```typescript
@@ -367,10 +367,9 @@ const sessionToken = await new SignJWT({
 
 | Service | Cookie Name | Notes |
 |---------|-------------|-------|
-| Member Portal | `cyclescope_portal_session` | Portal's own session |
+| Member Portal | `app_session_id` | Portal's own session (existing name, kept for compatibility) |
 | SwingTrade | `swingtrade_session` | SwingTrade local session |
 | OptionStrategy | `option_strategy_session` | OptionStrategy local session |
-| (Future services) | `{service_name}_session` | Follow this naming convention |
 
 ### 6.2 Cookie Options (ALL services)
 
@@ -396,7 +395,7 @@ export const SESSION_COOKIE_NAME = 'swingtrade_session';
 export const SESSION_COOKIE_NAME = 'option_strategy_session';
 
 // Portal: server/_core/cookies.ts
-export const SESSION_COOKIE_NAME = 'cyclescope_portal_session';
+export const SESSION_COOKIE_NAME = 'app_session_id';
 
 // Shared cookie options function (each service implements its own copy)
 export function getSessionCookieOptions(): {
@@ -833,7 +832,7 @@ When redirecting back to the portal on auth failure, use these query parameter v
 - [ ] Frontend: show/hide/disable sub-portal launch buttons based on tier
 - [ ] Frontend: handle `?error=upgrade_required` redirect-back from sub-portals
 - [ ] Set env vars: `SWINGTRADE_TOKEN_SECRET`, `OPTION_STRATEGY_TOKEN_SECRET`, `SWINGTRADE_URL`, `OPTION_STRATEGY_URL`
-- [ ] Portal session cookie named `cyclescope_portal_session`
+- [ ] Portal session cookie named `app_session_id` (existing name — no rename needed)
 
 ### SwingTrade
 

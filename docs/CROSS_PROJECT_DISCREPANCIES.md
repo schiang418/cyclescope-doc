@@ -131,7 +131,7 @@ Three different documents propose three different cookie names for SwingTrade.
 
 | Project | What to Change |
 |---------|---------------|
-| **Portal** | Update references from `stocks_session`/`options_session` to `swingtrade_session`/`option_strategy_session`. Update portal's own cookie from `app_session_id` to `cyclescope_portal_session`. |
+| **Portal** | Update references from `stocks_session`/`options_session` to `swingtrade_session`/`option_strategy_session`. Keep portal's own cookie as `app_session_id` (no rename — see Discrepancy #12). |
 | **SwingTrade** | Change cookie name from `session` to `swingtrade_session`. |
 | **OptionStrategy** | Already aligned. Uses `option_strategy_session`. |
 
@@ -337,7 +337,7 @@ The three projects encode different data in the handoff JWT.
 
 ## Discrepancy #12: Portal Session Cookie Name
 
-**Severity**: MODERATE
+**Severity**: ~~MODERATE~~ **RESOLVED (no change)**
 
 | Project | Portal Cookie Name |
 |---------|-------------------|
@@ -345,13 +345,13 @@ The three projects encode different data in the handoff JWT.
 | **SwingTrade** | Not referenced |
 | **OptionStrategy** | Not referenced |
 
-**Resolution**: Rename to `cyclescope_portal_session` for consistency with the `{service_name}_session` convention.
+**Resolution**: **Keep `app_session_id`.** The unified strategy initially recommended renaming to `cyclescope_portal_session` for naming consistency, but this provides no functional benefit while causing user disruption (all existing sessions would be invalidated, logging out every user). The portal cookie is never read by sub-portals, so the name has no cross-project impact.
 
 **Changes Required**:
 
 | Project | What to Change |
 |---------|---------------|
-| **Portal** | Rename `COOKIE_NAME` from `'app_session_id'` to `'cyclescope_portal_session'`. |
+| **Portal** | None. Keep `app_session_id`. |
 
 ---
 
@@ -476,7 +476,7 @@ Neither sub-portal explicitly checks tier on the `/auth` endpoint in their curre
 | 9 | CORS variable name | MODERATE | No | Yes | No |
 | 10 | Error response casing | LOW | No | No | Yes |
 | 11 | Health check exclusion | MODERATE | No | Yes | No |
-| 12 | Portal cookie name | MODERATE | Yes | No | No |
+| 12 | Portal cookie name | RESOLVED | No (keep `app_session_id`) | No | No |
 | 13 | Tier mapping function | HIGH | Yes | No | No |
 | 14 | Service identifiers | MODERATE | Yes | Yes | Yes |
 | 15 | Tier check on /auth | HIGH | Yes | No | Yes |
@@ -486,6 +486,6 @@ Neither sub-portal explicitly checks tier on the `/auth` endpoint in their curre
 
 | Project | Total Changes | Critical | High | Moderate | Low |
 |---------|--------------|----------|------|----------|-----|
-| **Portal** | 13 | 3 | 5 | 4 | 1 |
+| **Portal** | 12 | 3 | 5 | 3 | 1 |
 | **SwingTrade** | 6 | 2 | 1 | 2 | 1 |
 | **OptionStrategy** | 6 | 2 | 2 | 1 | 1 |
