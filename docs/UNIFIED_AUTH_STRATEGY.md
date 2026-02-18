@@ -65,7 +65,7 @@
 3. Each sub-portal receives a short-lived handoff token and creates its own local session.
 4. Per-service token secrets ensure compromise isolation.
 5. Sub-portal data is shared across all premium users (no per-user data isolation needed in sub-portals).
-6. SwingTrade and OptionStrategy are **architecturally independent services**. Tier-to-service access mapping is a business-layer decision configured via each service's `ALLOWED_TIERS`.
+6. SwingTrade and OptionStrategy are **architecturally independent premium services**. Tier-to-service access mapping is a business-layer decision configured via each service's `ALLOWED_TIERS`.
 
 ---
 
@@ -77,16 +77,18 @@ These are the **exact string values** stored in the database and embedded in JWT
 
 | Internal Key              | Tier Name           | Access Granted                              |
 |---------------------------|---------------------|---------------------------------------------|
-| `basic`                   | Basic               | Portal (base offering)                      |
+| `basic`                   | Basic               | Portal only                                 |
 | `stocks_and_options`      | Stocks + Options    | Portal + **SwingTrade** + **OptionStrategy**|
 
 > **No free tier.** All users have at least a `basic` subscription. There is no unpaid/community tier.
+>
+> SwingTrade and OptionStrategy are **premium services** — the `stocks_and_options` tier is what grants access to them.
 
 ### Tier-to-Service Access: Business vs Architecture
 
-SwingTrade and OptionStrategy are **independent services**. Which tiers can access which services is a **business decision**, not an architectural constraint. The mapping is configured per-service and can change at any time without code changes.
+SwingTrade and OptionStrategy are **architecturally independent premium services**. Which tiers can access which services is a **business decision**, not an architectural constraint. The mapping is configured per-service via `ALLOWED_TIERS` and can change at any time without code changes.
 
-**Current business decision**: All `basic` members get access to all services (promotional). This may be restricted in the future so that `basic` = Portal only.
+**Current business decision**: All `basic` members are given access to all premium services (promotional). This may be restricted in the future so that `basic` = Portal only and only `stocks_and_options` members access SwingTrade and OptionStrategy.
 
 ### Tier Mapping from Patreon
 
@@ -119,12 +121,14 @@ export function mapPatreonTierToAccess(
 Each sub-portal defines which tiers grant access. This is a **configurable business decision** — update these arrays when access policy changes.
 
 ```typescript
-// SwingTrade: src/auth.ts
-// Currently: all tiers get access (business decision — may be restricted later)
+// SwingTrade: src/auth.ts (premium service)
+// Nominally stocks_and_options only, but currently all tiers get access (business decision).
+// To restrict: change to ['stocks_and_options']
 const ALLOWED_TIERS: string[] = ['basic', 'stocks_and_options'];
 
-// OptionStrategy: src/auth.ts
-// Currently: all tiers get access (business decision — may be restricted later)
+// OptionStrategy: src/auth.ts (premium service)
+// Nominally stocks_and_options only, but currently all tiers get access (business decision).
+// To restrict: change to ['stocks_and_options']
 const ALLOWED_TIERS: string[] = ['basic', 'stocks_and_options'];
 ```
 
@@ -448,10 +452,10 @@ const SERVICE_CONFIG: Record<string, { secretEnvVar: string; urlEnvVar: string; 
   },
 };
 
-// Tier access rules — which tiers can access which services
+// Tier access rules — which tiers can access which premium services
 // This is a BUSINESS DECISION, not an architectural constraint.
-// Each service is independent; update its allowed tiers when policy changes.
-// Current policy: all tiers get access to all services (promotional).
+// Both services are nominally stocks_and_options only.
+// Current policy: all tiers get access (promotional). To restrict: remove 'basic'.
 const SERVICE_TIER_ACCESS: Record<string, string[]> = {
   swingtrade: ['basic', 'stocks_and_options'],
   'option-strategy': ['basic', 'stocks_and_options'],
@@ -505,7 +509,8 @@ export default router;
 ```typescript
 // Portal: src/components/PremiumServices.tsx
 
-// Business-level access config — update when policy changes
+// Premium service access config — update when business policy changes
+// Both are nominally stocks_and_options only; currently promotional for all tiers
 const TIER_ACCESS = {
   swingtrade: ['basic', 'stocks_and_options'],
   option_strategy: ['basic', 'stocks_and_options'],
@@ -554,8 +559,9 @@ import { Request, Response, NextFunction } from 'express';
 
 // ── Constants (differ per service) ──
 export const SESSION_COOKIE_NAME = 'swingtrade_session';  // or 'option_strategy_session'
-// Business decision — which tiers can access this service. Update when policy changes.
-const ALLOWED_TIERS = ['basic', 'stocks_and_options'];     // currently: all tiers (promotional)
+// Premium service — nominally stocks_and_options only.
+// Currently all tiers get access (business decision). To restrict: ['stocks_and_options']
+const ALLOWED_TIERS = ['basic', 'stocks_and_options'];
 const SERVICE_ID = 'swingtrade';                           // or 'option_strategy'
 
 // ── Auth Endpoint ──
@@ -649,7 +655,7 @@ app.use('/api', (req: Request, res: Response, next: NextFunction) => {
 | Constant | SwingTrade | OptionStrategy |
 |----------|------------|----------------|
 | `SESSION_COOKIE_NAME` | `'swingtrade_session'` | `'option_strategy_session'` |
-| `ALLOWED_TIERS` | `['basic', 'stocks_and_options']` (current policy) | `['basic', 'stocks_and_options']` (current policy) |
+| `ALLOWED_TIERS` | `['basic', 'stocks_and_options']` (nominally `['stocks_and_options']`; currently promotional) | `['basic', 'stocks_and_options']` (nominally `['stocks_and_options']`; currently promotional) |
 | `SERVICE_ID` | `'swingtrade'` | `'option_strategy'` |
 
 ---
@@ -759,18 +765,19 @@ export async function apiFetch(url: string, options?: RequestInit): Promise<Resp
 
 ## 13. Tier-Based Access Matrix
 
-> **Note**: The matrix below reflects the **current business policy** (all tiers get all services).
+> **Note**: SwingTrade and OptionStrategy are **premium services** that nominally belong to the `stocks_and_options` tier.
+> However, the current business policy grants all `basic` members access to all services (promotional).
 > This can be changed at any time by updating each service's `ALLOWED_TIERS` config.
 
-| Resource | `basic` | `stocks_and_options` |
-|----------|---------|----------------------|
-| Portal dashboard | yes | yes |
-| Portal blog / commentary | yes | yes |
-| SwingTrade — rankings | **yes** (current policy) | **yes** |
-| SwingTrade — portfolios | **yes** (current policy) | **yes** |
-| SwingTrade — EMA analysis | **yes** (current policy) | **yes** |
-| OptionStrategy — scanner | **yes** (current policy) | **yes** |
-| OptionStrategy — trade setups | **yes** (current policy) | **yes** |
+| Resource | `basic` (nominal) | `basic` (current policy) | `stocks_and_options` |
+|----------|--------------------|--------------------------|----------------------|
+| Portal dashboard | yes | yes | yes |
+| Portal blog / commentary | yes | yes | yes |
+| SwingTrade — rankings | no | **yes** (promotional) | **yes** |
+| SwingTrade — portfolios | no | **yes** (promotional) | **yes** |
+| SwingTrade — EMA analysis | no | **yes** (promotional) | **yes** |
+| OptionStrategy — scanner | no | **yes** (promotional) | **yes** |
+| OptionStrategy — trade setups | no | **yes** (promotional) | **yes** |
 
 ---
 

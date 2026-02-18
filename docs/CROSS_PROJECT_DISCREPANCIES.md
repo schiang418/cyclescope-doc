@@ -44,7 +44,7 @@ The three projects use fundamentally different tier naming schemes. If these don
 
 **Resolution**: Adopt two canonical tiers — `'basic'` and `'stocks_and_options'`. No free tier exists.
 
-**Rationale**: There are only two Patreon subscription levels. `basic` is the base offering (Portal access). `stocks_and_options` is the premium tier (Portal + SwingTrade + OptionStrategy). SwingTrade and OptionStrategy are architecturally independent services — which tiers can access which services is a business decision configured via each service's `ALLOWED_TIERS`. Currently, as a business decision, all `basic` members get access to all services.
+**Rationale**: There are only two Patreon subscription levels. `basic` is the base offering (Portal only). `stocks_and_options` is the premium tier (Portal + SwingTrade + OptionStrategy). SwingTrade and OptionStrategy are **premium services** — they nominally require `stocks_and_options`. However, which tiers can access which services is a business decision configured via each service's `ALLOWED_TIERS`. Currently, as a promotional business decision, all `basic` members are given access to all premium services.
 
 **Changes Required**:
 
