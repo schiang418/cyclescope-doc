@@ -50,7 +50,7 @@ The three projects use fundamentally different tier naming schemes. If these don
 
 | Project | What to Change |
 |---------|---------------|
-| **Portal** | Replace `mapPatreonTierToAccess()` return type to `'basic' \| 'stocks_and_options'`. Update database `tier` column values. Update all tier checks in frontend and backend. |
+| **Portal** | Implement `mapPatreonTierNameToAccess()` returning `'basic' \| 'stocks_and_options'`. Add `tier` enum and `patreonTier` varchar columns. Update all tier checks in frontend and backend. |
 | **SwingTrade** | Update tier values. Define `ALLOWED_TIERS = ['basic', 'stocks_and_options']` (current business policy). |
 | **OptionStrategy** | Define `ALLOWED_TIERS = ['basic', 'stocks_and_options']` (current business policy). |
 
@@ -201,9 +201,11 @@ The three projects encode different data in the handoff JWT.
 
 | Project | What to Change |
 |---------|---------------|
-| **Portal** | Use `.setSubject(String(user.id))` instead of `userId` in payload. Add `service` claim. Remove `userId` from payload body. |
+| **Portal** | **Handoff tokens**: use `.setSubject(String(user.id))`, add `service` claim, no `userId`. **Portal session JWT**: keep `userId` alongside `sub` for backward compat with existing sessions (see note below). |
 | **SwingTrade** | Add validation of `service` claim. Remove `patreonId` from expected claims. Read user ID from `payload.sub`. |
 | **OptionStrategy** | Read user ID from `payload.sub` instead of `payload.userId`. Add validation of `service` claim. |
+
+> **Portal session JWT backward compat**: The portal's own session JWT keeps `userId` alongside `sub` because existing logged-in users have tokens with only `userId`. Both fields are set to the same value in new tokens. The `verifyToken()` function handles both old and new formats. Once all old sessions expire naturally (7+ days), `userId` can be removed. This does NOT affect handoff tokens or sub-portal session tokens — those are new and use `sub` only.
 
 ---
 
@@ -364,15 +366,20 @@ The portal's tier mapping function returns different tier values than what the s
 | Portal's Current Implementation | What Sub-Portals Expect |
 |-------------------------------|------------------------|
 | `'free' \| 'basic' \| 'premium'` | `'basic' \| 'stocks_and_options'` |
-| Maps from Patreon tier *names* (e.g., `'Premium Tier'`) | Maps from Patreon tier *IDs* |
+| Maps from Patreon tier *names* (e.g., `'Premium Tier'`) | Consistent mapping to canonical tier values |
 | Returns `'basic'` as default for active patrons | Should default to `'basic'` for unmapped tiers |
 
-**Resolution**: Portal must map from Patreon tier IDs to the two canonical tier values.
+**Resolution**: Portal maps from Patreon tier **names** (accepted — portal team's approach) to the two canonical tier values. Function renamed to `mapPatreonTierNameToAccess()`. Comprehensive name-to-tier mapping handles multiple Patreon display name variations.
 
 ```typescript
-const PATREON_TIER_MAP: Record<string, SubscriptionTier> = {
-  '<patreon_basic_tier_id>': 'basic',
-  '<patreon_both_tier_id>': 'stocks_and_options',
+const PATREON_TIER_NAME_MAP: Record<string, SubscriptionTier> = {
+  'basic': 'basic',
+  'basic tier': 'basic',
+  'standard': 'basic',
+  'premium': 'stocks_and_options',
+  'premium tier': 'stocks_and_options',
+  'stocks + options': 'stocks_and_options',
+  'vip': 'stocks_and_options',
 };
 ```
 
@@ -380,7 +387,7 @@ const PATREON_TIER_MAP: Record<string, SubscriptionTier> = {
 
 | Project | What to Change |
 |---------|---------------|
-| **Portal** | Rewrite `mapPatreonTierToAccess()` to use tier IDs and return `'basic' \| 'stocks_and_options'`. |
+| **Portal** | Rename `mapPatreonTierToAccess()` to `mapPatreonTierNameToAccess()`. Map from tier names (lowercased). Return `'basic' \| 'stocks_and_options'`. Add `tier` enum and `patreonTier` varchar columns to users table. |
 
 ---
 

@@ -30,6 +30,9 @@
 14. [Error Response Format](#14-error-response-format)
 15. [Implementation Checklist](#15-implementation-checklist)
 16. [Dependencies](#16-dependencies)
+17. [Development Environment & Staging Strategy](#17-development-environment--staging-strategy)
+18. [Implementation Phases](#18-implementation-phases)
+19. [Impact Summary](#19-impact-summary)
 
 ---
 
@@ -92,27 +95,47 @@ SwingTrade and OptionStrategy are **architecturally independent premium services
 
 ### Tier Mapping from Patreon
 
-The portal maps Patreon tier IDs to internal keys:
+The portal maps Patreon tier **names** (as returned by the Patreon API) to internal keys. Multiple name variations are handled to account for Patreon display name changes.
+
+#### Patreon Tier Name → Internal Key
+
+| Patreon Tier Name | Internal Key |
+|-------------------|-------------|
+| `'Basic'` | `'basic'` |
+| `'Basic Tier'` | `'basic'` |
+| `'Standard'` | `'basic'` |
+| `'Premium'` | `'stocks_and_options'` |
+| `'Premium Tier'` | `'stocks_and_options'` |
+| `'Stocks + Options'` | `'stocks_and_options'` |
+| `'VIP'` | `'stocks_and_options'` |
+| *(unmapped / null)* | `'basic'` (default) |
 
 ```typescript
 // Portal: server/subscription.ts
 
-// Fill in actual Patreon tier IDs once created on patreon.com/cyclescope
-const PATREON_TIER_MAP: Record<string, SubscriptionTier> = {
-  '<patreon_basic_tier_id>': 'basic',
-  '<patreon_both_tier_id>': 'stocks_and_options',
-};
-
 export type SubscriptionTier = 'basic' | 'stocks_and_options';
 
-export function mapPatreonTierToAccess(
-  patreonTierId: string | null,
+// Maps Patreon tier display names to internal tier keys.
+// Add new name variations here as needed.
+const PATREON_TIER_NAME_MAP: Record<string, SubscriptionTier> = {
+  'basic': 'basic',
+  'basic tier': 'basic',
+  'standard': 'basic',
+  'premium': 'stocks_and_options',
+  'premium tier': 'stocks_and_options',
+  'stocks + options': 'stocks_and_options',
+  'vip': 'stocks_and_options',
+};
+
+export function mapPatreonTierNameToAccess(
+  patreonTierName: string | null,
   patronStatus: string
 ): SubscriptionTier {
   if (patronStatus !== 'active_patron') {
     return 'basic';
   }
-  return PATREON_TIER_MAP[patreonTierId || ''] || 'basic';
+  const normalized = (patreonTierName || '').toLowerCase().trim();
+  return PATREON_TIER_NAME_MAP[normalized] || 'basic';
 }
 ```
 
@@ -130,6 +153,48 @@ const ALLOWED_TIERS: string[] = ['basic', 'stocks_and_options'];
 // Nominally stocks_and_options only, but currently all tiers get access (business decision).
 // To restrict: change to ['stocks_and_options']
 const ALLOWED_TIERS: string[] = ['basic', 'stocks_and_options'];
+```
+
+### Database Schema — Tier Storage
+
+The portal stores two tier-related columns on the user table:
+
+| Column | Type | Purpose |
+|--------|------|---------|
+| `tier` | enum (`'basic'`, `'stocks_and_options'`) | Canonical internal tier used in JWTs, access checks, and all business logic. |
+| `patreonTier` | varchar (nullable) | Raw Patreon tier name from the API. For debugging and audit only — never used in access decisions. |
+
+> **Why store `patreonTier`?** When a user reports incorrect access, support can compare `patreonTier` (what Patreon sent) with `tier` (what the mapper produced) to diagnose mapping issues without re-querying the Patreon API.
+
+**Schema example (Drizzle)**:
+
+```typescript
+// Portal: drizzle/schema.ts
+export const users = mysqlTable("users", {
+  // ... existing fields ...
+
+  /** Patreon tier name from API (for reference/debugging) */
+  patreonTier: varchar("patreonTier", { length: 100 }),
+
+  /** Internal subscription tier for access control */
+  tier: mysqlEnum("tier", ["basic", "stocks_and_options"])
+    .default("basic")
+    .notNull(),
+
+  // ... rest of fields ...
+});
+```
+
+**Example data after migration**:
+
+```
+users table
+┌────┬──────────────────┬────────────────┬────────────────────┐
+│ id │ email            │ patreonTier    │ tier               │
+├────┼──────────────────┼────────────────┼────────────────────┤
+│ 1  │ john@example.com │ "Premium Tier" │ "stocks_and_options" │
+│ 2  │ jane@example.com │ "Basic"        │ "basic"              │
+└────┴──────────────────┴────────────────┴────────────────────┘
 ```
 
 ---
@@ -243,7 +308,7 @@ MEMBER_PORTAL_URL=https://portal.cyclescope.com
     │  ?token=eyJ...     │                         │
     │◀───────────────────│                         │
     │                    │                         │
-    │ 6. GET /auth?token=eyJ...                    │
+    │ 6. GET /auth/handoff?token=eyJ...             │
     │─────────────────────────────────────────────▶│
     │                                              │
     │                      7. Verify handoff token  │
@@ -276,14 +341,73 @@ MEMBER_PORTAL_URL=https://portal.cyclescope.com
 **Payload**:
 ```typescript
 interface PortalSessionPayload {
-  sub: string;        // User ID (as string)
-  email: string;      // User email
-  role: string;       // 'user' | 'admin'
-  tier: SubscriptionTier;  // 'basic' | 'stocks_and_options'
-  iat: number;        // Issued at (automatic)
-  exp: number;        // Expiration (automatic)
+  sub: string;              // User ID (as string) — canonical claim
+  userId: number;           // DEPRECATED: kept for backward compat with existing sessions.
+                            // New tokens set both `sub` and `userId`. Remove after session rotation (>=7d).
+  email: string;            // User email
+  role: string;             // 'user' | 'admin'
+  tier?: SubscriptionTier;  // 'basic' | 'stocks_and_options'
+                            // Optional: old tokens may not have tier. Fall back to DB lookup.
+  iat: number;              // Issued at (automatic)
+  exp: number;              // Expiration (automatic)
 }
 ```
+
+#### Three Token Types — Backward Compatibility Summary
+
+| Token | Where Used | `userId` | `sub` | Why |
+|-------|-----------|----------|-------|-----|
+| Portal Session JWT | Portal cookie (`app_session_id`) | Keep (backward compat) | Add | Existing sessions have `userId` only |
+| Handoff Token | Portal → Sub-portal (5-min) | No | Only | Brand new, start clean with JWT standard |
+| Sub-portal Session JWT | SwingTrade / OptionStrategy cookie | No | Only | Brand new, no legacy |
+
+**Token generation** (Portal session):
+```typescript
+// Portal: server/auth.ts
+export async function generateToken(payload: {
+  userId: number;
+  email: string;
+  role: string;
+  tier?: SubscriptionTier;
+}): Promise<string> {
+  return new SignJWT({
+    userId: payload.userId,  // KEEP for backward compat
+    email: payload.email,
+    role: payload.role,
+    tier: payload.tier,      // NEW
+  })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setSubject(String(payload.userId))  // NEW — sets "sub" claim
+    .setIssuedAt()
+    .setExpirationTime('7d')
+    .sign(JWT_SECRET);
+}
+```
+
+**Token verification (handles old + new formats)**:
+```typescript
+// Portal: server/auth.ts
+export async function verifyToken(token: string): Promise<JWTPayload | null> {
+  try {
+    const { payload } = await jwtVerify(token, JWT_SECRET);
+
+    // Handle both OLD tokens (userId only) and NEW tokens (userId + sub)
+    const userId = (payload.userId as number) || Number(payload.sub);
+
+    return {
+      userId,
+      email: payload.email as string,
+      role: payload.role as string,
+      tier: (payload.tier as SubscriptionTier) || undefined,
+      sub: payload.sub as string | undefined,
+    };
+  } catch (error) {
+    return null;
+  }
+}
+```
+
+> **Backward compatibility note (Portal only)**: Existing sessions contain `userId` but not `sub` or `tier`. The `verifyToken()` function handles both formats. Once all old sessions expire naturally (7 days for email/password, up to 365 days for Patreon OAuth), the `userId` field can be removed. Handoff tokens and sub-portal session tokens are NEW and use `sub` only — no backward compat needed.
 
 ### 5.2 Handoff Access Token (Portal -> Sub-Portal)
 
@@ -491,7 +615,7 @@ function createLaunchHandler(serviceKey: string) {
 
     const serviceUrl = process.env[config.urlEnvVar];
     return res.json({
-      redirectUrl: `${serviceUrl}/auth?token=${token}`,
+      redirectUrl: `${serviceUrl}/auth/handoff?token=${token}`,
     });
   };
 }
@@ -547,7 +671,7 @@ async function launchService(service: 'swingtrade' | 'option-strategy') {
 
 ### 8.1 Token Exchange Endpoint
 
-**Route**: `GET /auth?token=xxx`
+**Route**: `GET /auth/handoff?token=xxx`
 
 This is **identical** for both SwingTrade and OptionStrategy, differing only in constants.
 
@@ -695,8 +819,8 @@ Handled **exclusively** by the Member Portal. Sub-portals do NOT interact with P
 app.post('/api/webhooks/patreon', express.raw({ type: 'application/json' }), (req, res) => {
   // 1. Verify webhook signature using PATREON_WEBHOOK_SECRET
   // 2. Parse the event type and member data
-  // 3. Map the Patreon tier ID to internal tier key using PATREON_TIER_MAP
-  // 4. Update user record in portal database
+  // 3. Map the Patreon tier name to internal tier key using mapPatreonTierNameToAccess()
+  // 4. Update user record in portal database (set both `tier` and `patreonTier` columns)
   res.sendStatus(200);
 });
 ```
@@ -825,10 +949,15 @@ When redirecting back to the portal on auth failure, use these query parameter v
 
 - [ ] Patreon OAuth login flow
 - [ ] Patreon API call to fetch user tier and map to internal tier key
-- [ ] User database table with `tier` field using values: `basic`, `stocks_and_options`
+- [ ] DB migration: add `tier` enum column (`'basic'`, `'stocks_and_options'`) to users table
+- [ ] DB migration: add `patreonTier` varchar column to users table (raw Patreon name for debugging)
+- [ ] Backfill existing users' `tier` column based on current Patreon status
+- [ ] Implement `mapPatreonTierNameToAccess()` — map from Patreon tier names (not IDs)
+- [ ] Portal session JWT: include `tier` claim and both `sub` + `userId` (backward compat)
+- [ ] Portal `verifyToken()`: handle both old format (`userId` only) and new format (`userId` + `sub` + `tier`)
 - [ ] `POST /api/launch/swingtrade` — generate 5-min JWT signed with `SWINGTRADE_TOKEN_SECRET`
 - [ ] `POST /api/launch/option-strategy` — generate 5-min JWT signed with `OPTION_STRATEGY_TOKEN_SECRET`
-- [ ] `POST /api/webhooks/patreon` — handle subscription changes
+- [ ] `POST /api/webhooks/patreon` — handle subscription changes, update `tier` and `patreonTier` columns
 - [ ] Frontend: show/hide/disable sub-portal launch buttons based on tier
 - [ ] Frontend: handle `?error=upgrade_required` redirect-back from sub-portals
 - [ ] Set env vars: `SWINGTRADE_TOKEN_SECRET`, `OPTION_STRATEGY_TOKEN_SECRET`, `SWINGTRADE_URL`, `OPTION_STRATEGY_URL`
@@ -837,7 +966,7 @@ When redirecting back to the portal on auth failure, use these query parameter v
 ### SwingTrade
 
 - [ ] Install `jose` and `cookie-parser`
-- [ ] `GET /auth?token=xxx` — verify handoff token, check tier, set local session cookie
+- [ ] `GET /auth/handoff?token=xxx` — verify handoff token, check tier, set local session cookie
 - [ ] Validate `service` claim equals `'swingtrade'`
 - [ ] Allowed tiers: `['basic', 'stocks_and_options']` (current business policy — all tiers)
 - [ ] Session cookie named `swingtrade_session`
@@ -850,7 +979,7 @@ When redirecting back to the portal on auth failure, use these query parameter v
 ### OptionStrategy
 
 - [ ] Install `jose` and `cookie-parser`
-- [ ] `GET /auth?token=xxx` — verify handoff token, check tier, set local session cookie
+- [ ] `GET /auth/handoff?token=xxx` — verify handoff token, check tier, set local session cookie
 - [ ] Validate `service` claim equals `'option_strategy'`
 - [ ] Allowed tiers: `['basic', 'stocks_and_options']` (current business policy — all tiers)
 - [ ] Session cookie named `option_strategy_session`
@@ -893,3 +1022,128 @@ Sub-portals additionally require:
   "express": "^4.18.2"
 }
 ```
+
+---
+
+## 17. Development Environment & Staging Strategy
+
+### Staging Projects (Railway Duplicates)
+
+All changes are developed and tested on staging environments before production deployment.
+
+```
+PRODUCTION                          STAGING
+├── cyclescope-member-portal        ├── cyclescope-member-portal-staging
+│   (deploys from: main)            │   (deploys from: staging)
+├── cyclescope-swingtrade           ├── cyclescope-swingtrade-staging
+│   (deploys from: main)            │   (deploys from: staging)
+└── cyclescope-option-strategy      └── cyclescope-option-strategy-staging
+    (deploys from: main)                (deploys from: staging)
+```
+
+### Branch Strategy
+
+```
+feature/premium-auth ── push to staging ──► Staging deploys ──► Test
+                                                                  │
+                        └── After testing ──► Merge to main ──► Production deploys
+```
+
+- Production deploys from `main` branch
+- Staging deploys from `staging` branch
+- Feature development on feature branches → merge to `staging` → test → merge to `main`
+
+### Staging Setup Steps
+
+1. Duplicate each Railway project (copies services + env vars, NOT data)
+2. Create `staging` branches in each repo
+3. Configure staging projects to deploy from `staging` branch
+4. Update staging env vars with staging URLs and new secrets
+5. Add new database service in staging (data not copied from production)
+
+### Environment Variable Validation
+
+Each service SHOULD validate required env vars on startup and fail fast if any are missing:
+
+```typescript
+// Shared pattern: validate env vars on startup
+const REQUIRED_ENV_VARS = ['JWT_SECRET', 'PREMIUM_TOKEN_SECRET', 'MEMBER_PORTAL_URL'];
+
+for (const varName of REQUIRED_ENV_VARS) {
+  if (!process.env[varName]) {
+    throw new Error(`Missing required environment variable: ${varName}`);
+  }
+}
+```
+
+---
+
+## 18. Implementation Phases
+
+### Phase 1: Infrastructure (No User Impact)
+
+- Duplicate Railway projects for staging
+- Create `staging` branches in all 3 repos
+- Add new env vars to staging projects
+- Generate per-service secrets (`openssl rand -base64 32`)
+
+### Phase 2: Member Portal Changes
+
+| Task | Description |
+|------|-------------|
+| 2a | Add `tier` enum column and `patreonTier` varchar column to users schema |
+| 2b | Run DB migration (`npx drizzle-kit push`) |
+| 2c | Backfill `tier` for existing user(s) |
+| 2d | Create `server/subscription.ts` with `mapPatreonTierNameToAccess()` |
+| 2e | Update `server/auth.ts` — `generateToken()` to include `tier` and `sub`; `verifyToken()` to handle both old and new formats |
+| 2f | Update login/signup flows to set `tier` from Patreon data |
+| 2g | Create `POST /api/launch/swingtrade` and `POST /api/launch/option-strategy` endpoints |
+| 2h | Add launch buttons to dashboard UI |
+| 2i | Test on staging |
+
+**Validation**: Portal can generate correctly-formed handoff tokens. Existing sessions continue to work.
+
+### Phase 3: Sub-Portal Implementation
+
+| Task | Description |
+|------|-------------|
+| 3a | SwingTrade: implement `GET /auth/handoff?token=xxx` endpoint |
+| 3b | SwingTrade: implement `requireAuth` middleware, cookie handling, CORS |
+| 3c | OptionStrategy: implement `GET /auth/handoff?token=xxx` endpoint |
+| 3d | OptionStrategy: implement `requireAuth` middleware, cookie handling, CORS |
+| 3e | Both: validate `service` claim, check tier against `ALLOWED_TIERS` |
+| 3f | Both: frontend 401 handler redirects to portal |
+| 3g | Test complete handoff flow on staging |
+
+**Validation**: Full end-to-end: portal login → launch → handoff → sub-portal session.
+
+### Phase 4: Production Deployment
+
+- Merge `staging` → `main` (all 3 repos)
+- Add production env vars and generate production secrets
+- Verify handoff flow in production
+- Monitor for issues
+
+---
+
+## 19. Impact Summary
+
+### Zero Breaking Changes for Existing Users
+
+| Change | Impact on Existing Users |
+|--------|------------------------|
+| Add `tier` to portal JWT | None — optional field, old tokens still work via `verifyToken()` |
+| Add `sub` claim to portal JWT | None — `verifyToken()` handles both `userId` and `sub` |
+| Add `tier` column to DB | None — added with default `'basic'`, backfilled for existing users |
+| Keep `app_session_id` cookie | None — no cookie rename, no forced logout |
+| New env vars | None — additive only |
+| Launch endpoints | None — new functionality |
+| Per-service secrets | None — new functionality |
+
+**Summary**: All existing sessions remain valid. Users experience no disruption.
+
+### Rollback Strategy
+
+1. **Portal session backward compat** means old tokens still work — no emergency re-deploy needed.
+2. **Sub-portals are independent** — rolling back one does not affect the portal or the other.
+3. **Per-service secrets** mean a compromise of one service can be mitigated by rotating only that service's shared secret.
