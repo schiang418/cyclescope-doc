@@ -5,7 +5,7 @@
 >
 > **Reference**: [UNIFIED_AUTH_STRATEGY.md](./UNIFIED_AUTH_STRATEGY.md) — the single source of truth
 >
-> Last updated: 2026-02-18
+> Last updated: 2026-02-20
 
 ---
 
@@ -16,6 +16,8 @@
 | cyclescope-member-portal | `docs/AUTHENTICATION_AND_API_ARCHITECTURE.md` | `claude/fix-language-toggle-portal-O5mtJ` |
 | SwingTrade | `docs/AUTH_STRATEGY.md` | `claude/stock-swing-trade-ranking-lmugL` |
 | OptionStrategy | `docs/SUB_PORTAL_AUTH_INTEGRATION.md` | `claude/option-income-strategy-app-xtFx9` |
+
+> **Important — Documentation vs Code Reality**: The "Current State" descriptions in the discrepancies below describe what each project's *documentation* says, not what the *code* currently implements. As of 2026-02-20, most premium service features (handoff tokens, launch endpoints, tier checks) are **not yet implemented** in any project. This means the migration effort is largely **greenfield work**, not refactoring of existing functionality.
 
 ---
 
@@ -465,6 +467,60 @@ Neither sub-portal explicitly checks tier on the `/auth` endpoint in their curre
 | **Portal** | Implement webhook handler per unified strategy. |
 | **SwingTrade** | Remove any webhook handling references from sub-portal code (webhook is portal responsibility). |
 | **OptionStrategy** | No changes needed. |
+
+---
+
+## Additional Gaps (Code Reality)
+
+These gaps were identified by comparing the golden strategy docs against the **actual codebase**, not just the project documentation.
+
+### Gap A: `patreonStatus` Value Mismatch
+
+**Severity**: HIGH
+
+The golden doc's `mapPatreonTierNameToAccess()` originally checked `patronStatus !== 'active_patron'`, but the `users` table stores simplified values: `'active'` / `'inactive'` / `'cancelled'` (not `'active_patron'` / `'declined_patron'` / `'former_patron'` from the `patreonMembers` table).
+
+**Resolution**: Use `patreonStatus !== 'active'` — the function reads from the `users` table.
+
+### Gap B: `patreonMembers.tierId` Exists But Not Populated
+
+**Severity**: LOW
+
+The `patreonMembers` table has a `tierId` column (varchar 32), but it is not populated by the current sync. The daily sync stores tier names in `users.patreonTier`, not tier IDs.
+
+**Resolution**: Future enhancement. Keep name-based mapping as the current approach since `users.patreonTier` already stores the name.
+
+### Gap C: Session TTL Mismatch (Doc vs Code)
+
+**Severity**: LOW
+
+The golden doc originally said `7d` for email/password and `365d` for Patreon OAuth. The actual code uses `JWT_EXPIRATION = '7d'` for all login paths. Additionally, Patreon OAuth is disabled.
+
+**Resolution**: Uniform `7d` for all sessions. Golden doc updated.
+
+### Gap D: `admin_session` Cookie Undocumented
+
+**Severity**: MODERATE
+
+`shared/const.ts` defines `ADMIN_COOKIE_NAME = "admin_session"`. This was not documented in the golden docs' cookie table.
+
+**Resolution**: Added to the cookie table in Section 6.1 of the unified strategy.
+
+### Gap E: Railway Proxy-Aware `secure` Flag Not Documented
+
+**Severity**: MODERATE
+
+The portal has `server/_core/cookies.ts` with a `getSessionCookieOptions()` utility that checks `X-Forwarded-Proto` header for the `secure` flag (Railway runs behind a reverse proxy). The golden doc only showed `process.env.NODE_ENV === 'production'`.
+
+**Resolution**: Added Railway proxy note to Section 6.2 and referenced the existing utility in Section 6.3.
+
+### Gap F: Login History Not Mentioned
+
+**Severity**: LOW
+
+Portal has login history tracking (`loginHistory` table, `logLoginEvent()`). The golden docs didn't mention whether premium service launches should be logged.
+
+**Resolution**: Added as optional task in Phase 4 of Implementation Phases.
 
 ---
 

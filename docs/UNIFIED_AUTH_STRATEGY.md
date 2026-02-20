@@ -8,7 +8,7 @@
 > - **Stock Service**: `SwingTrade`
 > - **Options Service**: `OptionStrategy`
 >
-> Last updated: 2026-02-18
+> Last updated: 2026-02-20
 
 ---
 
@@ -23,7 +23,7 @@
 7. [Portal Implementation](#7-portal-implementation)
 8. [Sub-Portal Implementation](#8-sub-portal-implementation)
 9. [CORS Configuration](#9-cors-configuration)
-10. [Patreon Webhook Handling](#10-patreon-webhook-handling)
+10. [Patreon Tier Synchronization](#10-patreon-tier-synchronization)
 11. [Frontend 401 Handling](#11-frontend-401-handling)
 12. [Security Summary](#12-security-summary)
 13. [Tier-Based Access Matrix](#13-tier-based-access-matrix)
@@ -39,36 +39,45 @@
 ## 1. Architecture Overview
 
 ```
-┌──────────┐      OAuth      ┌────────────────────────┐
-│  Patreon  │◄──────────────►│  CycleScope Member     │
-│  (tiers)  │   webhooks     │  Portal                │
-└──────────┘                 │  - authenticates users  │
-                             │  - stores tier info     │
-                             │  - issues access tokens │
-                             └──────────┬─────────────┘
-                                        │
-                          ┌─────────────┼─────────────┐
-                          │  5-min JWT  │  5-min JWT  │
-                          ▼             │             ▼
-                 ┌──────────────┐      │    ┌──────────────┐
-                 │  SwingTrade  │      │    │OptionStrategy│
-                 │  (stocks)    │      │    │  (options)   │
-                 └──────────────┘      │    └──────────────┘
-                                       │
-                                  (future services)
+                  ┌──────────┐
+                  │  Patreon  │
+                  │  (tiers)  │
+                  └─────┬────┘
+                        │ daily sync (Creator API)
+                        │ + webhooks
+                        ▼
+┌────────┐       ┌────────────────────────┐
+│ Users  │       │  CycleScope Member     │
+│(email/ │──────►│  Portal                │
+│password│ login │  - authenticates users  │
+│ signup)│       │  - syncs tier data      │
+└────────┘       │  - issues access tokens │
+                 └──────────┬─────────────┘
+                            │
+              ┌─────────────┼─────────────┐
+              │  5-min JWT  │  5-min JWT  │
+              ▼             │             ▼
+     ┌──────────────┐      │    ┌──────────────┐
+     │  SwingTrade  │      │    │OptionStrategy│
+     │  (stocks)    │      │    │  (options)   │
+     └──────────────┘      │    └──────────────┘
+                           │
+                      (future services)
 ```
 
-**Portal** = gatekeeper (authenticates users, determines tier, issues access tokens)
+**Portal** = gatekeeper (authenticates users via email/password, syncs tier data from Patreon, issues access tokens)
 **SwingTrade / OptionStrategy** = enforcers (verify token, check tier, manage local sessions)
 
 ### Key Principles
 
-1. Sub-portals **never** handle passwords, signup, or Patreon OAuth directly.
+1. Sub-portals **never** handle passwords or signup.
 2. All user authentication UI lives **exclusively** in the Member Portal.
-3. Each sub-portal receives a short-lived handoff token and creates its own local session.
-4. Per-service token secrets ensure compromise isolation.
-5. Sub-portal data is shared across all premium users (no per-user data isolation needed in sub-portals).
-6. SwingTrade and OptionStrategy are **architecturally independent premium services**. Tier-to-service access mapping is a business-layer decision configured via each service's `ALLOWED_TIERS`.
+3. Portal authentication is **email/password only**. Patreon OAuth code exists in the codebase but is **disabled** via feature flag (`ENABLE_PATREON_OAUTH` env var not set). Users must register with the same email address used on their Patreon account.
+4. Patreon is a **subscription data source only** — daily sync using the Creator API keeps tier data current. Webhooks provide supplementary real-time updates.
+5. Each sub-portal receives a short-lived handoff token and creates its own local session.
+6. Per-service token secrets ensure compromise isolation.
+7. Sub-portal data is shared across all premium users (no per-user data isolation needed in sub-portals).
+8. SwingTrade and OptionStrategy are **architecturally independent premium services**. Tier-to-service access mapping is a business-layer decision configured via each service's `ALLOWED_TIERS`.
 
 ---
 
@@ -103,11 +112,9 @@ The portal maps Patreon tier **names** (as returned by the Patreon API) to inter
 |-------------------|-------------|
 | `'Basic'` | `'basic'` |
 | `'Basic Tier'` | `'basic'` |
-| `'Standard'` | `'basic'` |
 | `'Premium'` | `'stocks_and_options'` |
 | `'Premium Tier'` | `'stocks_and_options'` |
 | `'Stocks + Options'` | `'stocks_and_options'` |
-| `'VIP'` | `'stocks_and_options'` |
 | *(unmapped / null)* | `'basic'` (default) |
 
 ```typescript
@@ -115,44 +122,43 @@ The portal maps Patreon tier **names** (as returned by the Patreon API) to inter
 
 export type SubscriptionTier = 'basic' | 'stocks_and_options';
 
-// Maps Patreon tier display names to internal tier keys.
-// Add new name variations here as needed.
-const PATREON_TIER_NAME_MAP: Record<string, SubscriptionTier> = {
-  'basic': 'basic',
-  'basic tier': 'basic',
-  'standard': 'basic',
-  'premium': 'stocks_and_options',
-  'premium tier': 'stocks_and_options',
-  'stocks + options': 'stocks_and_options',
-  'vip': 'stocks_and_options',
-};
-
 export function mapPatreonTierNameToAccess(
-  patreonTierName: string | null,
-  patronStatus: string
+  tierName: string | null,
+  patreonStatus: string  // 'active' | 'inactive' | 'cancelled'
 ): SubscriptionTier {
-  if (patronStatus !== 'active_patron') {
+  if (patreonStatus !== 'active') {
     return 'basic';
   }
-  const normalized = (patreonTierName || '').toLowerCase().trim();
-  return PATREON_TIER_NAME_MAP[normalized] || 'basic';
+
+  const tierMap: Record<string, SubscriptionTier> = {
+    'Basic': 'basic',
+    'Basic Tier': 'basic',
+    'Premium': 'stocks_and_options',
+    'Premium Tier': 'stocks_and_options',
+    'Stocks + Options': 'stocks_and_options',
+  };
+
+  return tierMap[tierName || ''] || 'basic';
 }
 ```
 
+> **Note**: The `patreonMembers` table stores `tierId` (varchar 32) but it is not populated by the current sync. Name-based mapping is the current approach since `users.patreonTier` stores the tier name. Tier ID mapping is a future enhancement.
+
 ### Tier Check Constants (Sub-Portals)
 
-Each sub-portal defines which tiers grant access. This is a **configurable business decision** — update these arrays when access policy changes.
+Each sub-portal manages its own `ALLOWED_TIERS` configuration. This is a code constant (or env variable) in each sub-portal, **NOT** shared infrastructure. It separates **subscription data** (what the user paid for) from **access policy** (who can use the service).
+
+When the promotional period ends, update `ALLOWED_TIERS` in each sub-portal — **no database migration required**.
 
 ```typescript
-// SwingTrade: src/auth.ts (premium service)
-// Nominally stocks_and_options only, but currently all tiers get access (business decision).
-// To restrict: change to ['stocks_and_options']
-const ALLOWED_TIERS: string[] = ['basic', 'stocks_and_options'];
+// SwingTrade: src/auth.ts
+// OptionStrategy: src/auth.ts
 
-// OptionStrategy: src/auth.ts (premium service)
-// Nominally stocks_and_options only, but currently all tiers get access (business decision).
-// To restrict: change to ['stocks_and_options']
-const ALLOWED_TIERS: string[] = ['basic', 'stocks_and_options'];
+// Current: Promotional period — all tiers get access
+const ALLOWED_TIERS: SubscriptionTier[] = ['basic', 'stocks_and_options'];
+
+// Future: Restrict to premium only (one-line change, no DB migration)
+// const ALLOWED_TIERS: SubscriptionTier[] = ['stocks_and_options'];
 ```
 
 ### Database Schema — Tier Storage
@@ -176,9 +182,9 @@ export const users = mysqlTable("users", {
   /** Patreon tier name from API (for reference/debugging) */
   patreonTier: varchar("patreonTier", { length: 100 }),
 
-  /** Internal subscription tier for access control */
+  /** Internal subscription tier — reflects actual subscription, not access policy */
   tier: mysqlEnum("tier", ["basic", "stocks_and_options"])
-    .default("basic")
+    .default("basic")  // Reflects actual subscription
     .notNull(),
 
   // ... rest of fields ...
@@ -204,25 +210,35 @@ users table
 ### 3.1 Member Portal (`cyclescope-member-portal/.env`)
 
 ```env
-# ── Patreon OAuth ──
+# ── Patreon API (Sync & Webhooks) ──
 PATREON_CLIENT_ID=<from Patreon developer portal>
 PATREON_CLIENT_SECRET=<from Patreon developer portal>
-PATREON_REDIRECT_URI=https://portal.cyclescope.com/auth/patreon/callback
-PATREON_WEBHOOK_SECRET=<from Patreon webhook setup>
+PATREON_CREATOR_ACCESS_TOKEN=<creator token for daily sync>
+PATREON_CREATOR_REFRESH_TOKEN=<for token refresh>
+PATREON_CAMPAIGN_ID=<campaign ID for fetching members>
+PATREON_SYNC_CRON=<cron schedule, e.g. '0 2 * * *'>
+PATREON_SYNC_TIMEZONE=<timezone, e.g. 'America/New_York'>
+
+# ── Patreon OAuth (disabled — code exists but not enabled) ──
+# PATREON_REDIRECT_URI exists in Railway but is unused (OAuth disabled)
+# ENABLE_PATREON_OAUTH and VITE_ENABLE_PATREON_OAUTH are not set
+# These vars are harmless to keep — no removal needed
 
 # ── Portal Session ──
 JWT_SECRET=<random 256-bit secret, unique to portal>
 
-# ── Per-Service Token Secrets (for issuing handoff tokens) ──
-SWINGTRADE_TOKEN_SECRET=<random 256-bit secret, shared with SwingTrade>
-OPTION_STRATEGY_TOKEN_SECRET=<random 256-bit secret, shared with OptionStrategy>
-
-# ── Sub-Portal URLs ──
+# ── Per-Service Token Secrets (NEW — for premium services) ──
+SWINGTRADE_TOKEN_SECRET=<generate: openssl rand -base64 32>
+OPTION_STRATEGY_TOKEN_SECRET=<generate: openssl rand -base64 32>
 SWINGTRADE_URL=https://swingtrade.up.railway.app
 OPTION_STRATEGY_URL=https://option-strategy.up.railway.app
 
-# ── Email Service ──
+# ── Portal Services ──
+API_SECRET_KEY=<x-api-key for proxy API calls>
+ADMIN_PASSWORD=<admin authentication>
+ENABLE_PATREON_SYNC=<true/false — daily sync toggle>
 RESEND_API_KEY=re_xxxxx
+GEMINI_API_KEY=<AI translation>
 
 # ── Portal Cookie ──
 # Cookie name defined in code as constant: 'app_session_id'
@@ -275,9 +291,19 @@ MEMBER_PORTAL_URL=https://portal.cyclescope.com
 | `MEMBER_PORTAL_URL` | — | yes | yes | Portal URL for redirects and CORS origin |
 | `SWINGTRADE_URL` | yes | — | — | SwingTrade URL for redirects |
 | `OPTION_STRATEGY_URL` | yes | — | — | OptionStrategy URL for redirects |
-| `PATREON_CLIENT_ID` | yes | — | — | Only portal handles Patreon OAuth |
-| `PATREON_CLIENT_SECRET` | yes | — | — | Only portal handles Patreon OAuth |
-| `PATREON_WEBHOOK_SECRET` | yes | — | — | Only portal handles webhooks |
+| `PATREON_CLIENT_ID` | yes | — | — | Token refresh (OAuth disabled) |
+| `PATREON_CLIENT_SECRET` | yes | — | — | Token refresh (OAuth disabled) |
+| `PATREON_CREATOR_ACCESS_TOKEN` | yes | — | — | Creator token for daily sync API calls |
+| `PATREON_CREATOR_REFRESH_TOKEN` | yes | — | — | For refreshing the creator access token |
+| `PATREON_CAMPAIGN_ID` | yes | — | — | Campaign ID for fetching members |
+| `PATREON_SYNC_CRON` | yes | — | — | Cron schedule for daily sync |
+| `PATREON_SYNC_TIMEZONE` | yes | — | — | Timezone for cron schedule |
+| `PATREON_WEBHOOK_SECRET` | yes | — | — | Add when webhooks are implemented |
+| `ENABLE_PATREON_SYNC` | yes | — | — | Toggle for daily sync |
+| `API_SECRET_KEY` | yes | — | — | x-api-key for proxy API calls |
+| `ADMIN_PASSWORD` | yes | — | — | Admin authentication |
+| `RESEND_API_KEY` | yes | — | — | Email service |
+| `GEMINI_API_KEY` | yes | — | — | AI translation |
 
 > **Critical**: `PREMIUM_TOKEN_SECRET` and `JWT_SECRET` MUST be different values on each sub-portal. A compromise of the shared handoff secret should not compromise local session cookies (and vice versa).
 
@@ -335,7 +361,7 @@ MEMBER_PORTAL_URL=https://portal.cyclescope.com
 | Algorithm | `HS256` | |
 | Library | `jose` | |
 | Signing Secret | Portal's `JWT_SECRET` | |
-| Expiration | `7d` (email/password login) or `365d` (Patreon OAuth) | |
+| Expiration | `7d` | All login paths use the same expiration |
 | Cookie | `app_session_id` | |
 
 **Payload**:
@@ -407,7 +433,7 @@ export async function verifyToken(token: string): Promise<JWTPayload | null> {
 }
 ```
 
-> **Backward compatibility note (Portal only)**: Existing sessions contain `userId` but not `sub` or `tier`. The `verifyToken()` function handles both formats. Once all old sessions expire naturally (7 days for email/password, up to 365 days for Patreon OAuth), the `userId` field can be removed. Handoff tokens and sub-portal session tokens are NEW and use `sub` only — no backward compat needed.
+> **Backward compatibility note (Portal only)**: Existing sessions contain `userId` but not `sub` or `tier`. The `verifyToken()` function handles both formats. Once all old sessions expire naturally (7 days), the `userId` field can be removed. Handoff tokens and sub-portal session tokens are NEW and use `sub` only — no backward compat needed.
 
 ### 5.2 Handoff Access Token (Portal -> Sub-Portal)
 
@@ -492,6 +518,7 @@ const sessionToken = await new SignJWT({
 | Service | Cookie Name | Notes |
 |---------|-------------|-------|
 | Member Portal | `app_session_id` | Portal's own session (existing name, kept for compatibility) |
+| Member Portal (admin) | `admin_session` | Admin sessions — separate from user sessions and premium service architecture |
 | SwingTrade | `swingtrade_session` | SwingTrade local session |
 | OptionStrategy | `option_strategy_session` | OptionStrategy local session |
 
@@ -507,6 +534,8 @@ const sessionToken = await new SignJWT({
 }
 ```
 
+> **Railway proxy note**: Behind a reverse proxy (Railway), the `secure` flag may need to check the `X-Forwarded-Proto` header instead of `NODE_ENV`. The portal already has a utility for this at `server/_core/cookies.ts` — see `getSessionCookieOptions()`.
+
 ### 6.3 Cookie Helper (Shared Pattern)
 
 Each service defines its cookie config as a constant:
@@ -518,10 +547,11 @@ export const SESSION_COOKIE_NAME = 'swingtrade_session';
 // OptionStrategy: src/auth.ts
 export const SESSION_COOKIE_NAME = 'option_strategy_session';
 
-// Portal: server/_core/cookies.ts
+// Portal: server/_core/cookies.ts (EXISTING utility — handles Railway proxy detection)
 export const SESSION_COOKIE_NAME = 'app_session_id';
 
 // Shared cookie options function (each service implements its own copy)
+// Portal's version checks X-Forwarded-Proto for secure flag behind Railway proxy
 export function getSessionCookieOptions(): {
   httpOnly: boolean;
   secure: boolean;
@@ -626,6 +656,8 @@ router.post('/launch/option-strategy', requireAuth, createLaunchHandler('option-
 
 export default router;
 ```
+
+> **tRPC note**: The portal uses tRPC (`@trpc/server`). The Express examples above are framework-agnostic canonical patterns. The portal equivalent uses `publicProcedure.mutation()` within a tRPC router. The logic is the same — only the route registration differs.
 
 ### 7.2 Portal Frontend — Launch Buttons
 
@@ -800,11 +832,34 @@ app.use(cors({
 
 ---
 
-## 10. Patreon Webhook Handling
+## 10. Patreon Tier Synchronization
 
 Handled **exclusively** by the Member Portal. Sub-portals do NOT interact with Patreon.
 
-### Events to Handle
+### 10.1 Daily Batch Sync (Primary Mechanism)
+
+The portal runs a daily batch sync via `patreonSync.ts` (`syncAllPatreonMembers()`). This is the **primary** mechanism for keeping tier data current.
+
+| Aspect | Detail |
+|--------|--------|
+| Script | `server/patreonSync.ts` → `syncAllPatreonMembers()` |
+| Schedule | Configured via `PATREON_SYNC_CRON` (e.g., `'0 2 * * *'`) |
+| Timezone | `PATREON_SYNC_TIMEZONE` (e.g., `'America/New_York'`) |
+| Toggle | `ENABLE_PATREON_SYNC` env var |
+| API | Patreon Creator API using `PATREON_CREATOR_ACCESS_TOKEN` |
+| Campaign | Fetches members for `PATREON_CAMPAIGN_ID` |
+
+**What it does**:
+1. Fetches all campaign members from Patreon Creator API
+2. Matches Patreon members to portal users by email
+3. Updates `users.patreonTier` (raw Patreon tier name) and `users.tier` (mapped internal tier) using `mapPatreonTierNameToAccess()`
+4. Users not found in Patreon member list keep their current tier
+
+### 10.2 Webhook Sync (Supplementary)
+
+Webhooks provide supplementary **near-real-time** updates for pledge changes. This supplements the daily sync for faster tier updates.
+
+#### Events to Handle
 
 | Event | Action |
 |-------|--------|
@@ -812,7 +867,7 @@ Handled **exclusively** by the Member Portal. Sub-portals do NOT interact with P
 | `members:pledge:update` | Update user tier (upgrade or downgrade) |
 | `members:pledge:delete` | Downgrade user tier to `basic` |
 
-### Portal Endpoint
+#### Portal Endpoint
 
 ```typescript
 // Portal: server/routes/webhooks.ts
@@ -824,6 +879,8 @@ app.post('/api/webhooks/patreon', express.raw({ type: 'application/json' }), (re
   res.sendStatus(200);
 });
 ```
+
+> **Note**: `PATREON_WEBHOOK_SECRET` is not yet configured. Webhooks should be set up after the daily sync is working reliably.
 
 ### Propagation Delay Note
 
@@ -868,8 +925,9 @@ export async function apiFetch(url: string, options?: RequestInit): Promise<Resp
 
 | Measure | What It Does | Where |
 |---------|-------------|-------|
-| Patreon OAuth | Authenticates user identity | Portal |
-| Tier from Patreon API | Determines what the user can access | Portal |
+| Email/password auth | Authenticates user identity (portal's own user database) | Portal |
+| Signup email validation | Users must register with the same email used on Patreon | Portal |
+| Tier from Patreon sync | Daily batch sync + webhooks keep tier data current | Portal |
 | Per-service handoff secrets | Compromise of one sub-portal doesn't affect others | Portal <-> Sub-Portal |
 | 5-min JWT handoff token | Short-lived pass from portal to sub-portal | Portal -> Sub-Portal |
 | `service` claim in handoff | Sub-portal can reject tokens intended for other services | In JWT |
@@ -881,7 +939,7 @@ export async function apiFetch(url: string, options?: RequestInit): Promise<Resp
 | `sameSite: lax` | CSRF protection | All |
 | CORS lockdown | Prevents random websites from making API calls | Sub-Portal |
 | Separate `JWT_SECRET` per service | Compromise of one doesn't affect others | All |
-| Patreon webhooks | Keeps portal in sync with subscription changes | Portal |
+| Patreon daily sync + webhooks | Keeps portal in sync with subscription changes | Portal |
 | `/api/health` excluded from auth | Health checks work without authentication | Sub-Portal |
 
 ---
@@ -947,21 +1005,31 @@ When redirecting back to the portal on auth failure, use these query parameter v
 
 ### Member Portal (`cyclescope-member-portal`)
 
-- [ ] Patreon OAuth login flow
-- [ ] Patreon API call to fetch user tier and map to internal tier key
-- [ ] DB migration: add `tier` enum column (`'basic'`, `'stocks_and_options'`) to users table
+**EXISTING** (already implemented):
+- [x] Email/password login flow (bcrypt)
+- [x] User database with email, password, role fields
+- [x] Cookie utility (`server/_core/cookies.ts`) with Railway proxy detection
+- [x] Daily Patreon sync (`patreonSync.ts` → `syncAllPatreonMembers()`)
+- [x] Patreon API integration (Creator API calls)
+- [x] Portal session cookie named `app_session_id`
+- [x] Admin session cookie named `admin_session`
+
+**NEW** (to be implemented):
+- [ ] DB migration: add `tier` enum column (`'basic'`, `'stocks_and_options'`) to users table (default: `'basic'`)
 - [ ] DB migration: add `patreonTier` varchar column to users table (raw Patreon name for debugging)
 - [ ] Backfill existing users' `tier` column based on current Patreon status
-- [ ] Implement `mapPatreonTierNameToAccess()` — map from Patreon tier names (not IDs)
-- [ ] Portal session JWT: include `tier` claim and both `sub` + `userId` (backward compat)
-- [ ] Portal `verifyToken()`: handle both old format (`userId` only) and new format (`userId` + `sub` + `tier`)
+- [ ] Implement `mapPatreonTierNameToAccess()` in `server/subscription.ts` — map from Patreon tier names (not IDs)
 - [ ] `POST /api/launch/swingtrade` — generate 5-min JWT signed with `SWINGTRADE_TOKEN_SECRET`
 - [ ] `POST /api/launch/option-strategy` — generate 5-min JWT signed with `OPTION_STRATEGY_TOKEN_SECRET`
-- [ ] `POST /api/webhooks/patreon` — handle subscription changes, update `tier` and `patreonTier` columns
 - [ ] Frontend: show/hide/disable sub-portal launch buttons based on tier
 - [ ] Frontend: handle `?error=upgrade_required` redirect-back from sub-portals
 - [ ] Set env vars: `SWINGTRADE_TOKEN_SECRET`, `OPTION_STRATEGY_TOKEN_SECRET`, `SWINGTRADE_URL`, `OPTION_STRATEGY_URL`
-- [ ] Portal session cookie named `app_session_id` (existing name — no rename needed)
+
+**MODIFY** (existing code needs updates):
+- [ ] `generateToken()`: include `tier` claim and use `.setSubject()` (add `sub` alongside existing `userId`)
+- [ ] `verifyToken()`: handle both old format (`userId` only) and new format (`userId` + `sub` + `tier`)
+- [ ] Login flow: include `tier` in JWT payload
+- [ ] Daily sync: update to set `users.tier` column using `mapPatreonTierNameToAccess()`
 
 ### SwingTrade
 
@@ -1080,49 +1148,45 @@ for (const varName of REQUIRED_ENV_VARS) {
 
 ## 18. Implementation Phases
 
-### Phase 1: Infrastructure (No User Impact)
+### Phase 1: Database
 
-- Duplicate Railway projects for staging
-- Create `staging` branches in all 3 repos
-- Add new env vars to staging projects
+- Add `tier` enum column to users table (default: `'basic'`)
+- Add `patreonTier` varchar column to users table
+- Run migration (`npx drizzle-kit push`)
+- Backfill `tier` for existing user(s) using name-based mapping
+
+**Validation**: DB schema updated, existing user data preserved, `tier` column populated.
+
+### Phase 2: Tier Mapping & JWT
+
+- Create `server/subscription.ts` with `mapPatreonTierNameToAccess()`
+- Update `generateToken()` to include `tier` and use `.setSubject()`
+- Update `verifyToken()` to handle both old and new token formats
+- Update login flow to include `tier` in JWT
+- Update daily sync to set `users.tier`
+
+**Validation**: New portal sessions include `tier` and `sub` claims. Old sessions still work. Daily sync updates tiers correctly.
+
+### Phase 3: Launch Endpoints
+
+- Add per-service env vars (`SWINGTRADE_TOKEN_SECRET`, `OPTION_STRATEGY_TOKEN_SECRET`, `SWINGTRADE_URL`, `OPTION_STRATEGY_URL`)
 - Generate per-service secrets (`openssl rand -base64 32`)
+- Create `POST /api/launch/swingtrade`
+- Create `POST /api/launch/option-strategy`
+- Add launch buttons to dashboard UI
 
-### Phase 2: Member Portal Changes
+**Validation**: Portal generates correctly-formed handoff tokens with `sub`, `email`, `tier`, `service` claims.
 
-| Task | Description |
-|------|-------------|
-| 2a | Add `tier` enum column and `patreonTier` varchar column to users schema |
-| 2b | Run DB migration (`npx drizzle-kit push`) |
-| 2c | Backfill `tier` for existing user(s) |
-| 2d | Create `server/subscription.ts` with `mapPatreonTierNameToAccess()` |
-| 2e | Update `server/auth.ts` — `generateToken()` to include `tier` and `sub`; `verifyToken()` to handle both old and new formats |
-| 2f | Update login/signup flows to set `tier` from Patreon data |
-| 2g | Create `POST /api/launch/swingtrade` and `POST /api/launch/option-strategy` endpoints |
-| 2h | Add launch buttons to dashboard UI |
-| 2i | Test on staging |
+### Phase 4: Sub-Portals
 
-**Validation**: Portal can generate correctly-formed handoff tokens. Existing sessions continue to work.
+- Implement `GET /auth/handoff?token=xxx` in SwingTrade
+- Implement `GET /auth/handoff?token=xxx` in OptionStrategy
+- Implement `requireAuth` middleware, cookie handling, CORS in both
+- Configure `ALLOWED_TIERS = ['basic', 'stocks_and_options']` (promotional)
+- Frontend 401 handler redirects to portal in both
+- Optional: Log premium service launches to `loginHistory` table via `logLoginEvent()`
 
-### Phase 3: Sub-Portal Implementation
-
-| Task | Description |
-|------|-------------|
-| 3a | SwingTrade: implement `GET /auth/handoff?token=xxx` endpoint |
-| 3b | SwingTrade: implement `requireAuth` middleware, cookie handling, CORS |
-| 3c | OptionStrategy: implement `GET /auth/handoff?token=xxx` endpoint |
-| 3d | OptionStrategy: implement `requireAuth` middleware, cookie handling, CORS |
-| 3e | Both: validate `service` claim, check tier against `ALLOWED_TIERS` |
-| 3f | Both: frontend 401 handler redirects to portal |
-| 3g | Test complete handoff flow on staging |
-
-**Validation**: Full end-to-end: portal login → launch → handoff → sub-portal session.
-
-### Phase 4: Production Deployment
-
-- Merge `staging` → `main` (all 3 repos)
-- Add production env vars and generate production secrets
-- Verify handoff flow in production
-- Monitor for issues
+**Validation**: Full end-to-end: portal login → launch → handoff → sub-portal session → API calls with cookie → 401 redirect back to portal.
 
 ---
 
