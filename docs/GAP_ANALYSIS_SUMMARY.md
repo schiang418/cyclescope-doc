@@ -5,7 +5,7 @@
 > For full details and rationale, see [CROSS_PROJECT_DISCREPANCIES.md](./CROSS_PROJECT_DISCREPANCIES.md).
 > For the authoritative spec, see [UNIFIED_AUTH_STRATEGY.md](./UNIFIED_AUTH_STRATEGY.md).
 >
-> Last updated: 2026-02-18
+> Last updated: 2026-02-20
 
 ---
 
@@ -19,7 +19,11 @@ Three CycleScope projects were analyzed for authentication alignment:
 | SwingTrade | `docs/AUTH_STRATEGY.md` |
 | OptionStrategy | `docs/SUB_PORTAL_AUTH_INTEGRATION.md` |
 
-**16 discrepancies** were found — **3 critical, 5 high, 5 moderate, 3 low**.
+**16 discrepancies** were found — **3 critical, 5 high, 5 moderate, 3 low**. Additionally, **6 gaps (A–F)** were identified by comparing the golden docs against the actual codebase.
+
+> **Important**: Most premium service features (handoff tokens, launch endpoints, tier checks) are **not yet implemented**. The migration effort is largely **greenfield work**, not refactoring.
+>
+> **Auth model**: Portal authentication is email/password only. Patreon OAuth code exists but is **disabled** via feature flag (`ENABLE_PATREON_OAUTH` not set). Patreon is a subscription data source only (daily sync + webhooks).
 
 ---
 
@@ -75,23 +79,28 @@ Three CycleScope projects were analyzed for authentication alignment:
 
 ## Changes Required Per Project
 
-### Portal (12 changes)
+### Portal (12 changes + 6 gaps)
 
-| # | Severity | Change |
-|---|----------|--------|
-| 1 | CRITICAL | Implement `mapPatreonTierNameToAccess()` to return `basic` / `stocks_and_options`; add `tier` enum + `patreonTier` columns; update all tier checks |
-| 2 | CRITICAL | Replace `PREMIUM_TOKEN_SECRET` with `SWINGTRADE_TOKEN_SECRET` + `OPTION_STRATEGY_TOKEN_SECRET`; use correct secret per service |
-| 6 | CRITICAL | Handoff tokens: use `.setSubject(String(user.id))`, add `service` claim, no `userId`. Portal session JWT: keep `userId` alongside `sub` for backward compat |
-| 3 | HIGH | Rename env vars: `PREMIUM_STOCKS_URL` -> `SWINGTRADE_URL`, `PREMIUM_OPTIONS_URL` -> `OPTION_STRATEGY_URL` |
-| 4 | HIGH | Rename sub-portal cookie references: `stocks_session` -> `swingtrade_session`, `options_session` -> `option_strategy_session` (portal keeps `app_session_id`) |
-| 7 | HIGH | Update sub-portal session token example to use `sub` claim and include `tier` |
-| 13 | HIGH | Rename to `mapPatreonTierNameToAccess()`; map from Patreon tier names with comprehensive name-to-tier table; return `basic` / `stocks_and_options`. Add `tier` enum + `patreonTier` varchar columns. |
-| 15 | HIGH | Update sub-portal example code to include tier check after token verification |
-| 5 | MODERATE | Replace `GET /api/premium/access-token?service=xxx` with per-service `POST /api/launch/*` endpoints |
-| 12 | ~~MODERATE~~ | ~~Rename `app_session_id` cookie~~ — **Resolved: keep `app_session_id`, no change needed** |
-| 14 | MODERATE | Use `'swingtrade'` and `'option_strategy'` as service identifiers in token claims |
-| 16 | MODERATE | Implement webhook handler per unified strategy |
-| 8 | LOW | Update sub-portal example redirect from `/dashboard` to `/` |
+> **Already existing**: Email/password login, user database, bcrypt, cookie utility (`server/_core/cookies.ts`), daily Patreon sync (`patreonSync.ts`), admin session cookie. Most items below are **NEW** (greenfield) or **MODIFY** (update existing code).
+
+| # | Severity | Type | Change |
+|---|----------|------|--------|
+| 1 | CRITICAL | NEW | Implement `mapPatreonTierNameToAccess()` to return `basic` / `stocks_and_options`; add `tier` enum + `patreonTier` columns; update all tier checks |
+| 2 | CRITICAL | NEW | Add `SWINGTRADE_TOKEN_SECRET` + `OPTION_STRATEGY_TOKEN_SECRET` env vars; use correct secret per service |
+| 6 | CRITICAL | NEW | Handoff tokens: use `.setSubject(String(user.id))`, add `service` claim, no `userId`. Portal session JWT: keep `userId` alongside `sub` for backward compat |
+| 3 | HIGH | NEW | Add env vars: `SWINGTRADE_URL`, `OPTION_STRATEGY_URL` |
+| 4 | HIGH | NEW | Configure sub-portal cookie references: `swingtrade_session`, `option_strategy_session` (portal keeps `app_session_id`) |
+| 7 | HIGH | NEW | Sub-portal session token uses `sub` claim and includes `tier` |
+| 13 | HIGH | NEW | Create `mapPatreonTierNameToAccess()` in `server/subscription.ts`; case-sensitive Patreon tier name mapping |
+| 15 | HIGH | NEW | Sub-portal handoff endpoint includes tier check |
+| 5 | MODERATE | NEW | Create per-service `POST /api/launch/*` endpoints |
+| 12 | RESOLVED | — | Keep `app_session_id` — no change needed |
+| 14 | MODERATE | NEW | Use `'swingtrade'` and `'option_strategy'` as service identifiers in token claims |
+| 16 | MODERATE | NEW | Implement webhook handler (after daily sync is stable) |
+| 8 | LOW | NEW | Sub-portal example redirect to `/` |
+| A | HIGH | MODIFY | Fix `patreonStatus` check: use `!== 'active'` (not `'active_patron'`) |
+| C | LOW | MODIFY | Uniform 7d session TTL (OAuth is disabled) |
+| D | MODERATE | — | Document `admin_session` cookie (already exists) |
 
 ### SwingTrade (6 changes)
 
@@ -117,14 +126,29 @@ Three CycleScope projects were analyzed for authentication alignment:
 
 ---
 
+## Additional Gaps (Code Reality)
+
+These gaps were identified by comparing the golden docs against the **actual codebase**.
+
+| Gap | Issue | Severity | Resolution |
+|-----|-------|----------|------------|
+| A | `patreonStatus` check used `'active_patron'` but users table stores `'active'` | HIGH | Use `patreonStatus !== 'active'` in tier mapping |
+| B | `patreonMembers.tierId` exists but not populated by sync | LOW | Future enhancement; keep name-based mapping |
+| C | Session TTL was 7d/365d in doc, 7d in code; OAuth disabled | LOW | Uniform 7d for all sessions |
+| D | `admin_session` cookie undocumented | MODERATE | Added to cookie table |
+| E | Railway proxy-aware `secure` flag not documented | MODERATE | Documented `X-Forwarded-Proto` pattern |
+| F | Login history (`loginHistory` table) not mentioned | LOW | Optional task in Phase 4 |
+
+---
+
 ## Recommended Implementation Order
 
-1. **Portal tier values & mapping** (#1, #13) — Everything depends on correct tier values
-2. **Portal token secrets & env vars** (#2, #3) — Security foundation
-3. **Handoff token claims** (#6) — Portal + both sub-portals
-4. **Sub-portal auth validation** (#15, #11) — Defense in depth
-5. **Sub-portal cookie names** (#4) — SwingTrade and OptionStrategy only (portal keeps `app_session_id`)
-6. **Session token claims** (#7) — After handoff tokens are stable
-7. **Launch endpoints & service IDs** (#5, #14) — API contract changes
-8. **CORS, redirects, error format** (#9, #8, #10) — Low-risk cleanup
-9. **Webhook handling** (#16) — Portal-only, can be done independently
+The implementation follows a 4-phase plan:
+
+**Phase 1: Database** — Add `tier` enum + `patreonTier` columns, migrate, backfill (#1, #13)
+
+**Phase 2: Tier Mapping & JWT** — Create `mapPatreonTierNameToAccess()`, update `generateToken()`/`verifyToken()`, update login flow and daily sync (#1, #13, #6, #7, Gap A)
+
+**Phase 3: Launch Endpoints** — Add per-service env vars (#2, #3), create `POST /api/launch/*` endpoints (#5, #14), generate per-service secrets
+
+**Phase 4: Sub-Portals** — Implement `/auth/handoff` (#6), `requireAuth` middleware (#11), CORS (#9), cookie names (#4), tier checks (#15), error format (#10), frontend 401 (#8), optional login history (Gap F)
